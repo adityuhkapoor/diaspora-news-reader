@@ -2,12 +2,27 @@ import { NextResponse } from "next/server";
 import { findArticle } from "@/lib/rss";
 import { readCache, writeCache } from "@/lib/cache";
 import { summarizeArticle } from "@/lib/cohere";
+import { checkRateLimit, recordPaidCall } from "@/lib/rate-limit";
 import type { Summary } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function clientIp(request: Request): string {
+  const fwd = request.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return request.headers.get("x-real-ip") ?? "unknown";
+}
+
 export async function POST(request: Request) {
+  const rl = checkRateLimit(clientIp(request));
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: rl.reason === "daily" ? "Daily limit reached" : "Too many requests" },
+      { status: 429, headers: { "retry-after": String(rl.retryAfter) } },
+    );
+  }
+
   let articleId: string;
   try {
     const body = (await request.json()) as { articleId?: string };
@@ -35,6 +50,7 @@ export async function POST(request: Request) {
       title: article.title,
       body: article.snippet || article.title,
     });
+    recordPaidCall();
     await writeCache(articleId, summary);
     return NextResponse.json({ summary, cached: false });
   } catch (error) {
